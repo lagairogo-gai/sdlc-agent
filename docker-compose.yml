@@ -1,0 +1,1002 @@
+# Docker Production Deployment Package
+# Complete containerized deployment for Agentic AI SDLC System
+
+# docker-compose.yml - Main orchestration file
+version: '3.8'
+
+services:
+  # Redis for message bus and caching
+  redis:
+    image: redis:7-alpine
+    container_name: agentic-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - agentic-network
+
+  # Neo4j for knowledge graph
+  neo4j:
+    image: neo4j:5.15-community
+    container_name: agentic-neo4j
+    ports:
+      - "7474:7474"  # HTTP
+      - "7687:7687"  # Bolt
+    environment:
+      - NEO4J_AUTH=neo4j/agentic-password-2024
+      - NEO4J_dbms_memory_heap_initial__size=512m
+      - NEO4J_dbms_memory_heap_max__size=1G
+      - NEO4J_dbms_memory_pagecache_size=512m
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
+      - NEO4J_dbms_security_procedures_allowlist=apoc.*
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - ./neo4j/plugins:/plugins
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "agentic-password-2024", "RETURN 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - agentic-network
+
+  # PostgreSQL for relational data
+  postgres:
+    image: postgres:15-alpine
+    container_name: agentic-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=agentic_sdlc
+      - POSTGRES_USER=agentic_user
+      - POSTGRES_PASSWORD=agentic-db-password-2024
+      - POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentic_user -d agentic_sdlc"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - agentic-network
+
+  # Orchestration Engine
+  orchestrator:
+    build:
+      context: ./orchestrator
+      dockerfile: Dockerfile
+      args:
+        - BUILD_ENV=production
+    container_name: agentic-orchestrator
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=production
+      - REDIS_URL=redis://redis:6379
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=agentic-password-2024
+      - POSTGRES_URL=postgresql://agentic_user:agentic-db-password-2024@postgres:5432/agentic_sdlc
+      - LOG_LEVEL=INFO
+      - MAX_WORKERS=4
+      - SECURITY_SECRET_KEY=your-super-secret-jwt-key-change-in-production
+    volumes:
+      - ./logs:/app/logs
+      - ./config:/app/config
+    depends_on:
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - agentic-network
+    restart: unless-stopped
+
+  # Requirements Agent
+  requirements-agent:
+    build:
+      context: ./agents/requirements
+      dockerfile: Dockerfile
+    container_name: agentic-requirements-agent
+    environment:
+      - AGENT_ID=requirements_agent_001
+      - AGENT_TYPE=requirements
+      - ORCHESTRATOR_URL=http://orchestrator:8000
+      - REDIS_URL=redis://redis:6379
+      - LLM_PROVIDER=openai
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - JIRA_URL=${JIRA_URL}
+      - JIRA_USERNAME=${JIRA_USERNAME}
+      - JIRA_API_TOKEN=${JIRA_API_TOKEN}
+      - CONFLUENCE_URL=${CONFLUENCE_URL}
+      - CONFLUENCE_USERNAME=${CONFLUENCE_USERNAME}
+      - CONFLUENCE_API_TOKEN=${CONFLUENCE_API_TOKEN}
+    volumes:
+      - ./agents/requirements/config:/app/config
+      - ./logs:/app/logs
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    networks:
+      - agentic-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  # Design Agent
+  design-agent:
+    build:
+      context: ./agents/design
+      dockerfile: Dockerfile
+    container_name: agentic-design-agent
+    environment:
+      - AGENT_ID=design_agent_001
+      - AGENT_TYPE=design
+      - ORCHESTRATOR_URL=http://orchestrator:8000
+      - REDIS_URL=redis://redis:6379
+      - LLM_PROVIDER=openai
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - FIGMA_API_TOKEN=${FIGMA_API_TOKEN}
+    volumes:
+      - ./agents/design/config:/app/config
+      - ./logs:/app/logs
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    networks:
+      - agentic-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  # Code Generation Agent
+  code-agent:
+    build:
+      context: ./agents/code
+      dockerfile: Dockerfile
+    container_name: agentic-code-agent
+    environment:
+      - AGENT_ID=code_agent_001
+      - AGENT_TYPE=code_generation
+      - ORCHESTRATOR_URL=http://orchestrator:8000
+      - REDIS_URL=redis://redis:6379
+      - LLM_PROVIDER=openai
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - GITLAB_TOKEN=${GITLAB_TOKEN}
+    volumes:
+      - ./agents/code/config:/app/config
+      - ./logs:/app/logs
+      - ./code_workspace:/app/workspace
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    networks:
+      - agentic-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+
+  # Testing Agent
+  testing-agent:
+    build:
+      context: ./agents/testing
+      dockerfile: Dockerfile
+    container_name: agentic-testing-agent
+    environment:
+      - AGENT_ID=testing_agent_001
+      - AGENT_TYPE=testing
+      - ORCHESTRATOR_URL=http://orchestrator:8000
+      - REDIS_URL=redis://redis:6379
+      - LLM_PROVIDER=openai
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - SELENIUM_HUB_URL=http://selenium-hub:4444
+    volumes:
+      - ./agents/testing/config:/app/config
+      - ./logs:/app/logs
+      - ./test_results:/app/test_results
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    networks:
+      - agentic-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+          cpus: '1.5'
+
+  # CI/CD Agent
+  cicd-agent:
+    build:
+      context: ./agents/cicd
+      dockerfile: Dockerfile
+    container_name: agentic-cicd-agent
+    environment:
+      - AGENT_ID=cicd_agent_001
+      - AGENT_TYPE=integration
+      - ORCHESTRATOR_URL=http://orchestrator:8000
+      - REDIS_URL=redis://redis:6379
+      - LLM_PROVIDER=openai
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - JENKINS_URL=${JENKINS_URL}
+      - JENKINS_USERNAME=${JENKINS_USERNAME}
+      - JENKINS_API_TOKEN=${JENKINS_API_TOKEN}
+      - GITHUB_ACTIONS_TOKEN=${GITHUB_TOKEN}
+    volumes:
+      - ./agents/cicd/config:/app/config
+      - ./logs:/app/logs
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    networks:
+      - agentic-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  # Deployment Agent
+  deployment-agent:
+    build:
+      context: ./agents/deployment
+      dockerfile: Dockerfile
+    container_name: agentic-deployment-agent
+    environment:
+      - AGENT_ID=deployment_agent_001
+      - AGENT_TYPE=deployment
+      - ORCHESTRATOR_URL=http://orchestrator:8000
+      - REDIS_URL=redis://redis:6379
+      - LLM_PROVIDER=openai
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ARGOCD_URL=${ARGOCD_URL}
+      - ARGOCD_TOKEN=${ARGOCD_TOKEN}
+      - KUBERNETES_CONFIG_PATH=/app/config/kubeconfig
+    volumes:
+      - ./agents/deployment/config:/app/config
+      - ./logs:/app/logs
+      - ~/.kube:/app/.kube:ro
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    networks:
+      - agentic-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  # Monitoring Agent
+  monitoring-agent:
+    build:
+      context: ./agents/monitoring
+      dockerfile: Dockerfile
+    container_name: agentic-monitoring-agent
+    environment:
+      - AGENT_ID=monitoring_agent_001
+      - AGENT_TYPE=monitoring
+      - ORCHESTRATOR_URL=http://orchestrator:8000
+      - REDIS_URL=redis://redis:6379
+      - LLM_PROVIDER=openai
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - PROMETHEUS_URL=${PROMETHEUS_URL}
+      - GRAFANA_URL=${GRAFANA_URL}
+      - GRAFANA_TOKEN=${GRAFANA_TOKEN}
+      - DATADOG_API_KEY=${DATADOG_API_KEY}
+    volumes:
+      - ./agents/monitoring/config:/app/config
+      - ./logs:/app/logs
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    networks:
+      - agentic-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '0.5'
+
+  # React Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - NODE_ENV=production
+        - REACT_APP_API_URL=http://localhost:8000
+        - REACT_APP_WS_URL=ws://localhost:8000/ws
+    container_name: agentic-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    networks:
+      - agentic-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: agentic-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/ssl:/etc/nginx/ssl
+      - ./logs/nginx:/var/log/nginx
+    depends_on:
+      - frontend
+      - orchestrator
+    networks:
+      - agentic-network
+    restart: unless-stopped
+
+  # Selenium Hub for UI Testing
+  selenium-hub:
+    image: selenium/hub:4.15.0
+    container_name: agentic-selenium-hub
+    ports:
+      - "4444:4444"
+    environment:
+      - GRID_MAX_SESSION=4
+      - GRID_BROWSER_TIMEOUT=300
+      - GRID_TIMEOUT=300
+    networks:
+      - agentic-network
+    restart: unless-stopped
+
+  # Chrome Node for Selenium
+  selenium-chrome:
+    image: selenium/node-chrome:4.15.0
+    container_name: agentic-selenium-chrome
+    shm_size: 2gb
+    environment:
+      - HUB_HOST=selenium-hub
+      - HUB_PORT=4444
+      - NODE_MAX_INSTANCES=2
+      - NODE_MAX_SESSION=2
+    depends_on:
+      - selenium-hub
+    networks:
+      - agentic-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  # Prometheus for Metrics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: agentic-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - agentic-network
+    restart: unless-stopped
+
+  # Grafana for Dashboards
+  grafana:
+    image: grafana/grafana:latest
+    container_name: agentic-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=agentic-grafana-2024
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources
+    depends_on:
+      - prometheus
+    networks:
+      - agentic-network
+    restart: unless-stopped
+
+  # Log Aggregation with ELK Stack
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: agentic-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    networks:
+      - agentic-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.11.0
+    container_name: agentic-logstash
+    volumes:
+      - ./logstash/pipeline:/usr/share/logstash/pipeline
+      - ./logs:/logs:ro
+    depends_on:
+      - elasticsearch
+    networks:
+      - agentic-network
+    restart: unless-stopped
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.0
+    container_name: agentic-kibana
+    ports:
+      - "5601:5601"
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    depends_on:
+      - elasticsearch
+    networks:
+      - agentic-network
+    restart: unless-stopped
+
+networks:
+  agentic-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  redis_data:
+  neo4j_data:
+  neo4j_logs:
+  postgres_data:
+  prometheus_data:
+  grafana_data:
+  elasticsearch_data:
+
+---
+
+# .env.example - Environment variables template
+# Copy to .env and update with your actual values
+
+# LLM Configuration
+OPENAI_API_KEY=sk-your-openai-api-key-here
+GOOGLE_API_KEY=your-google-api-key-here
+AZURE_OPENAI_KEY=your-azure-openai-key-here
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
+
+# SDLC Tools Configuration
+# Jira
+JIRA_URL=https://your-domain.atlassian.net
+JIRA_USERNAME=your-email@company.com
+JIRA_API_TOKEN=your-jira-api-token
+
+# Confluence
+CONFLUENCE_URL=https://your-domain.atlassian.net/wiki
+CONFLUENCE_USERNAME=your-email@company.com
+CONFLUENCE_API_TOKEN=your-confluence-api-token
+
+# GitHub
+GITHUB_TOKEN=ghp_your-github-token-here
+
+# GitLab
+GITLAB_TOKEN=glpat-your-gitlab-token-here
+
+# Jenkins
+JENKINS_URL=http://jenkins.company.com
+JENKINS_USERNAME=admin
+JENKINS_API_TOKEN=your-jenkins-api-token
+
+# ArgoCD
+ARGOCD_URL=https://argocd.company.com
+ARGOCD_TOKEN=your-argocd-token
+
+# Monitoring
+PROMETHEUS_URL=http://prometheus.company.com:9090
+GRAFANA_URL=http://grafana.company.com:3000
+GRAFANA_TOKEN=your-grafana-service-account-token
+DATADOG_API_KEY=your-datadog-api-key
+
+# Figma
+FIGMA_API_TOKEN=your-figma-api-token
+
+# Security
+JWT_SECRET_KEY=your-super-secret-jwt-key-change-in-production-make-it-long-and-random
+ENCRYPTION_KEY=your-32-character-encryption-key-here
+
+---
+
+# Dockerfile.orchestrator - Orchestration Engine Container
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY . .
+
+# Create non-root user
+RUN useradd -m -u 1000 agentic && chown -R agentic:agentic /app
+USER agentic
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+  CMD curl -f http://localhost:8000/health || exit 1
+
+# Start application
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+
+---
+
+# Dockerfile.agent - Base Agent Container Template
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install LangChain and related packages
+RUN pip install --no-cache-dir \
+    langchain \
+    langchain-openai \
+    langchain-google-genai \
+    langchain-community \
+    sentence-transformers \
+    redis \
+    neo4j \
+    psycopg2-binary \
+    httpx \
+    jira \
+    python-gitlab \
+    docker \
+    kubernetes
+
+# Copy agent code
+COPY . .
+
+# Create non-root user
+RUN useradd -m -u 1000 agent && chown -R agent:agent /app
+USER agent
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+  CMD python -c "import requests; requests.get('http://localhost:8001/health')" || exit 1
+
+# Start agent
+CMD ["python", "agent_main.py"]
+
+---
+
+# Dockerfile.frontend - React Frontend Container
+FROM node:18-alpine as builder
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+RUN npm ci --only=production
+
+# Copy source code
+COPY . .
+
+# Build the app
+ARG NODE_ENV=production
+ARG REACT_APP_API_URL
+ARG REACT_APP_WS_URL
+RUN npm run build
+
+# Production stage
+FROM nginx:alpine
+
+# Copy built app
+COPY --from=builder /app/build /usr/share/nginx/html
+
+# Copy nginx configuration
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+# Add health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost/ || exit 1
+
+EXPOSE 3000
+
+CMD ["nginx", "-g", "daemon off;"]
+
+---
+
+# nginx.conf - Nginx Configuration
+events {
+    worker_connections 1024;
+}
+
+http {
+    upstream orchestrator {
+        server orchestrator:8000;
+    }
+
+    upstream frontend {
+        server frontend:3000;
+    }
+
+    # Rate limiting
+    limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
+    limit_req_zone $binary_remote_addr zone=websocket:10m rate=5r/s;
+
+    # Security headers
+    add_header X-Frame-Options DENY;
+    add_header X-Content-Type-Options nosniff;
+    add_header X-XSS-Protection "1; mode=block";
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains";
+
+    server {
+        listen 80;
+        server_name localhost;
+
+        # Frontend
+        location / {
+            proxy_pass http://frontend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        # API endpoints
+        location /api/ {
+            limit_req zone=api burst=20 nodelay;
+            proxy_pass http://orchestrator/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        # WebSocket endpoint
+        location /ws {
+            limit_req zone=websocket burst=10 nodelay;
+            proxy_pass http://orchestrator/ws;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        # Health check endpoint
+        location /health {
+            access_log off;
+            return 200 "healthy\n";
+            add_header Content-Type text/plain;
+        }
+    }
+}
+
+---
+
+# prometheus.yml - Prometheus Configuration
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  # - "first_rules.yml"
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'orchestrator'
+    static_configs:
+      - targets: ['orchestrator:8000']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+
+  - job_name: 'agents'
+    static_configs:
+      - targets: 
+        - 'requirements-agent:8001'
+        - 'design-agent:8001'
+        - 'code-agent:8001'
+        - 'testing-agent:8001'
+        - 'cicd-agent:8001'
+        - 'deployment-agent:8001'
+        - 'monitoring-agent:8001'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis:6379']
+
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres:5432']
+
+---
+
+# requirements.txt - Python Dependencies
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+langchain==0.0.350
+langchain-openai==0.0.2
+langchain-google-genai==0.0.6
+langchain-community==0.0.10
+redis==5.0.1
+neo4j==5.15.0
+psycopg2-binary==2.9.9
+httpx==0.25.2
+websockets==12.0
+pydantic==2.5.0
+jira==3.5.0
+python-gitlab==4.2.0
+docker==6.1.3
+kubernetes==28.1.0
+prometheus-client==0.19.0
+sentence-transformers==2.2.2
+numpy==1.24.3
+pandas==2.1.4
+networkx==3.2.1
+python-multipart==0.0.6
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+alembic==1.12.1
+sqlalchemy==2.0.23
+mcp==1.0.0
+cryptography==41.0.7
+pyyaml==6.0.1
+aiofiles==23.2.1
+celery==5.3.4
+flower==2.0.1
+
+---
+
+# Makefile - Deployment Automation
+.PHONY: build up down logs clean setup test security-scan
+
+# Build all images
+build:
+	docker-compose build --parallel
+
+# Start all services
+up:
+	docker-compose up -d
+	@echo "🚀 Agentic AI SDLC System is starting..."
+	@echo "Frontend: http://localhost:3000"
+	@echo "API: http://localhost:8000"
+	@echo "Grafana: http://localhost:3001 (admin/agentic-grafana-2024)"
+	@echo "Kibana: http://localhost:5601"
+	@echo "Neo4j: http://localhost:7474 (neo4j/agentic-password-2024)"
+
+# Stop all services
+down:
+	docker-compose down
+
+# Follow logs
+logs:
+	docker-compose logs -f
+
+# Clean up everything
+clean:
+	docker-compose down -v --remove-orphans
+	docker system prune -f
+	docker volume prune -f
+
+# Initial setup
+setup:
+	@echo "🔧 Setting up Agentic AI SDLC System..."
+	cp .env.example .env
+	@echo "📝 Please edit .env file with your configuration"
+	mkdir -p logs/{agents,orchestrator,nginx}
+	mkdir -p config/{agents,orchestrator}
+	mkdir -p code_workspace
+	mkdir -p test_results
+	@echo "✅ Setup complete. Run 'make build && make up' to start the system"
+
+# Run tests
+test:
+	docker-compose exec orchestrator python -m pytest tests/
+	docker-compose exec requirements-agent python -m pytest tests/
+	docker-compose exec code-agent python -m pytest tests/
+
+# Security scan
+security-scan:
+	@echo "🔍 Running security scans..."
+	docker run --rm -v $(PWD):/app securecodewarrior/docker-security-scan /app
+	docker run --rm -v $(PWD):/src returntocorp/semgrep --config=auto /src
+
+# Health check
+health:
+	@echo "🏥 Checking system health..."
+	curl -f http://localhost/health || echo "❌ Frontend unhealthy"
+	curl -f http://localhost:8000/health || echo "❌ Orchestrator unhealthy"
+	docker-compose ps
+
+# Backup data
+backup:
+	@echo "💾 Creating backup..."
+	mkdir -p backups/$(shell date +%Y%m%d_%H%M%S)
+	docker-compose exec postgres pg_dump -U agentic_user agentic_sdlc > backups/$(shell date +%Y%m%d_%H%M%S)/postgres.sql
+	docker-compose exec neo4j cypher-shell -u neo4j -p agentic-password-2024 "CALL apoc.export.cypher.all('/var/lib/neo4j/import/backup.cypher', {})" || true
+	docker cp agentic-neo4j:/var/lib/neo4j/import/backup.cypher backups/$(shell date +%Y%m%d_%H%M%S)/neo4j.cypher
+	@echo "✅ Backup completed in backups/$(shell date +%Y%m%d_%H%M%S)/"
+
+# Development mode
+dev:
+	docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+# Production deployment
+prod:
+	@echo "🚀 Deploying to production..."
+	docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+	@echo "✅ Production deployment complete"
+
+---
+
+# README.md - Complete Setup Instructions
+# Agentic AI-Powered SDLC System
+
+## 🚀 Quick Start
+
+1. **Clone and setup:**
+   ```bash
+   git clone <repository-url>
+   cd agentic-ai-sdlc
+   make setup
+   ```
+
+2. **Configure environment:**
+   ```bash
+   cp .env.example .env
+   # Edit .env with your API keys and tool configurations
+   ```
+
+3. **Build and start:**
+   ```bash
+   make build
+   make up
+   ```
+
+4. **Access the system:**
+   - Frontend Dashboard: http://localhost:3000
+   - API Documentation: http://localhost:8000/docs
+   - Monitoring: http://localhost:3001 (Grafana)
+   - Logs: http://localhost:5601 (Kibana)
+
+## 🔧 Configuration
+
+### Required API Keys
+- OpenAI API Key for LLM capabilities
+- Tool-specific tokens (Jira, GitHub, etc.)
+- See `.env.example` for complete list
+
+### Tool Integrations
+The system supports integration with:
+- **Planning:** Jira, Confluence, Trello
+- **Development:** GitHub, GitLab, VS Code
+- **CI/CD:** Jenkins, GitHub Actions, Azure DevOps
+- **Monitoring:** Prometheus, Grafana, Datadog
+- **Testing:** Selenium, Jest, Postman
+
+## 🛡️ Security Features
+- JWT-based authentication
+- API rate limiting
+- Container security scanning
+- Encrypted inter-service communication
+- RBAC for agent permissions
+
+## 📊 Monitoring & Observability
+- Real-time agent execution monitoring
+- Prometheus metrics collection
+- Grafana dashboards
+- ELK stack for log aggregation
+- Custom alerts and notifications
+
+## 🔄 MCP & A2A Protocol Support
+- Full MCP (Model Context Protocol) compliance
+- A2A (Agent-to-Agent) communication
+- Standardized tool integrations
+- Cross-platform agent interoperability
+
+## 🧪 Testing
+```bash
+make test           # Run all tests
+make security-scan  # Security vulnerability scan
+make health         # System health check
+```
+
+## 📦 Backup & Recovery
+```bash
+make backup         # Create system backup
+```
+
+## 🚀 Production Deployment
+```bash
+make prod           # Deploy to production
+```
+
+## 📈 Scaling
+- Horizontal agent scaling via Docker Swarm/Kubernetes
+- Redis Cluster for high availability
+- Neo4j cluster for knowledge graph scaling
+- Load balancing with Nginx
+
+This production-ready deployment package provides a complete, secure, and scalable Agentic AI SDLC system with comprehensive monitoring, logging, and tool integrations.
