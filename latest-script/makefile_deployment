@@ -1,0 +1,105 @@
+.PHONY: build up down logs clean setup test security-scan
+
+# Build all images
+build:
+	docker-compose build --parallel
+
+# Start all services
+up:
+	docker-compose up -d
+	@echo "🚀 Agentic AI SDLC System is starting..."
+	@echo "Frontend: http://localhost:3000"
+	@echo "API: http://localhost:8000"
+	@echo "Grafana: http://localhost:3001 (admin/agentic-grafana-2024)"
+	@echo "Neo4j: http://localhost:7474 (neo4j/agentic-password-2024)"
+
+# Stop all services
+down:
+	docker-compose down
+
+# Follow logs
+logs:
+	docker-compose logs -f
+
+# Show specific service logs
+logs-orchestrator:
+	docker-compose logs -f orchestrator
+
+logs-frontend:
+	docker-compose logs -f frontend
+
+logs-agents:
+	docker-compose logs -f requirements-agent design-agent code-agent
+
+# Clean up everything
+clean:
+	docker-compose down -v --remove-orphans
+	docker system prune -f
+	docker volume prune -f
+
+# Initial setup
+setup:
+	@echo "🔧 Setting up Agentic AI SDLC System..."
+	cp .env.example .env
+	@echo "📝 Please edit .env file with your configuration"
+	mkdir -p logs/{agents,orchestrator,nginx}
+	mkdir -p config/{agents,orchestrator}
+	mkdir -p code_workspace
+	mkdir -p test_results
+	mkdir -p prometheus grafana/dashboards
+	@echo "✅ Setup complete. Run 'make build && make up' to start the system"
+
+# Run tests
+test:
+	docker-compose exec orchestrator python -m pytest tests/
+	docker-compose exec requirements-agent python -m pytest tests/
+	docker-compose exec code-agent python -m pytest tests/
+
+# Security scan
+security-scan:
+	@echo "🔍 Running security scans..."
+	docker run --rm -v $(PWD):/app securecodewarrior/docker-security-scan /app
+	docker run --rm -v $(PWD):/src returntocorp/semgrep --config=auto /src
+
+# Health check
+health:
+	@echo "🏥 Checking system health..."
+	curl -f http://localhost:3000/ || echo "❌ Frontend unhealthy"
+	curl -f http://localhost:8000/health || echo "❌ Orchestrator unhealthy"
+	docker-compose ps
+
+# Backup data
+backup:
+	@echo "💾 Creating backup..."
+	mkdir -p backups/$(shell date +%Y%m%d_%H%M%S)
+	docker-compose exec postgres pg_dump -U agentic_user agentic_sdlc > backups/$(shell date +%Y%m%d_%H%M%S)/postgres.sql
+	docker-compose exec neo4j cypher-shell -u neo4j -p agentic-password-2024 "CALL apoc.export.cypher.all('/var/lib/neo4j/import/backup.cypher', {})" || true
+	docker cp agentic-neo4j:/var/lib/neo4j/import/backup.cypher backups/$(shell date +%Y%m%d_%H%M%S)/neo4j.cypher
+	@echo "✅ Backup completed in backups/$(shell date +%Y%m%d_%H%M%S)/"
+
+# Development mode
+dev:
+	docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+# Production deployment
+prod:
+	@echo "🚀 Deploying to production..."
+	docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+	@echo "✅ Production deployment complete"
+
+# Quick fixes for your current issue
+fix-frontend:
+	@echo "🔧 Fixing frontend connectivity issues..."
+	docker-compose build frontend
+	docker-compose up -d frontend
+	@echo "✅ Frontend rebuilt with API connectivity fixes"
+
+# Debug connectivity
+debug:
+	@echo "🔍 Debugging system connectivity..."
+	@echo "Checking orchestrator health:"
+	curl -v http://localhost:8000/health || echo "❌ Orchestrator not accessible"
+	@echo "\nChecking from inside frontend container:"
+	docker-compose exec frontend wget -qO- http://orchestrator:8000/health || echo "❌ Internal connectivity failed"
+	@echo "\nChecking Docker networks:"
+	docker network ls | grep agentic

@@ -1,0 +1,44 @@
+# LLM Configuration
+OPENAI_API_KEY=sk-your-openai-api-key-here
+GOOGLE_API_KEY=your-google-api-key-here
+AZURE_OPENAI_KEY=your-azure-openai-key-here
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
+
+# SDLC Tools Configuration
+# Jira
+JIRA_URL=https://your-domain.atlassian.net
+JIRA_USERNAME=your-email@company.com
+JIRA_API_TOKEN=your-jira-api-token
+
+# Confluence
+CONFLUENCE_URL=https://your-domain.atlassian.net/wiki
+CONFLUENCE_USERNAME=your-email@company.com
+CONFLUENCE_API_TOKEN=your-confluence-api-token
+
+# GitHub
+GITHUB_TOKEN=ghp_your-github-token-here
+
+# GitLab
+GITLAB_TOKEN=glpat-your-gitlab-token-here
+
+# Jenkins
+JENKINS_URL=http://jenkins.company.com
+JENKINS_USERNAME=admin
+JENKINS_API_TOKEN=your-jenkins-api-token
+
+# ArgoCD
+ARGOCD_URL=https://argocd.company.com
+ARGOCD_TOKEN=your-argocd-token
+
+# Monitoring
+PROMETHEUS_URL=http://prometheus.company.com:9090
+GRAFANA_URL=http://grafana.company.com:3000
+GRAFANA_TOKEN=your-grafana-service-account-token
+DATADOG_API_KEY=your-datadog-api-key
+
+# Figma
+FIGMA_API_TOKEN=your-figma-api-token
+
+# Security
+JWT_SECRET_KEY=your-super-secret-jwt-key-change-in-production-make-it-long-and-random
+ENCRYPTION_KEY=your-32-character-encryption-key-here

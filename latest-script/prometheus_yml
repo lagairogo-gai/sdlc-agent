@@ -1,0 +1,38 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  # - "first_rules.yml"
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'orchestrator'
+    static_configs:
+      - targets: ['orchestrator:8000']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+
+  - job_name: 'agents'
+    static_configs:
+      - targets: 
+        - 'requirements-agent:8001'
+        - 'design-agent:8001'
+        - 'code-agent:8001'
+        - 'testing-agent:8001'
+        - 'cicd-agent:8001'
+        - 'deployment-agent:8001'
+        - 'monitoring-agent:8001'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis:6379']
+
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres:5432']
