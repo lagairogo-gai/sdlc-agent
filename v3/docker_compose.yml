@@ -1,0 +1,49 @@
+services:
+  ai-monitoring:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - DATADOG_API_KEY=${DATADOG_API_KEY:-demo_key}
+      - DATADOG_APP_KEY=${DATADOG_APP_KEY:-demo_key}
+      - PAGERDUTY_API_KEY=${PAGERDUTY_API_KEY:-demo_key}
+      - SERVICENOW_INSTANCE=${SERVICENOW_INSTANCE:-demo}
+      - SERVICENOW_USERNAME=${SERVICENOW_USERNAME:-demo}
+      - SERVICENOW_PASSWORD=${SERVICENOW_PASSWORD:-demo}
+      - SMTP_SERVER=${SMTP_SERVER:-smtp.gmail.com}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USERNAME=${SMTP_USERNAME:-demo@company.com}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-demo}
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - logs_data:/app/logs
+      - app_data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  redis_data:
+  logs_data:
+  app_data:
