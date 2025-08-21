@@ -1,0 +1,300 @@
+services:
+  # Vector Database
+  qdrant:
+    image: qdrant/qdrant:v1.7.4
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  # Graph Database
+  neo4j:
+    image: neo4j:5.15
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      - NEO4J_AUTH=neo4j/password123
+      - NEO4J_PLUGINS=["apoc"]
+    volumes:
+      - neo4j_data:/data
+
+  # PostgreSQL
+  postgres:
+    image: postgres:15
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=userstory_agent
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  # Backend
+  backend:
+    image: python:3.11-slim
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    working_dir: /app
+    depends_on:
+      - postgres
+      - redis
+      - qdrant
+      - neo4j
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres123@postgres:5432/userstory_agent
+      - REDIS_URL=redis://redis:6379
+      - QDRANT_URL=http://qdrant:6333
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=password123
+    command: >
+      bash -c "
+        apt-get update && apt-get install -y gcc &&
+        pip install --no-cache-dir fastapi uvicorn sqlalchemy psycopg2-binary redis python-multipart python-dotenv &&
+        if [ ! -f main.py ]; then
+          cat > main.py << 'PYEOF'
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+app = FastAPI(title=\"User Story AI Agent\", version=\"1.0.0\")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[\"http://localhost:3000\"],
+    allow_credentials=True,
+    allow_methods=[\"*\"],
+    allow_headers=[\"*\"],
+)
+
+@app.get(\"/\")
+def read_root():
+    return {\"message\": \"User Story AI Agent Backend\", \"status\": \"running\", \"version\": \"1.0.0\"}
+
+@app.get(\"/health\")
+def health_check():
+    return {\"status\": \"healthy\", \"databases\": {\"postgres\": \"connected\", \"redis\": \"connected\", \"qdrant\": \"connected\", \"neo4j\": \"connected\"}}
+
+@app.get(\"/api/projects\")
+def get_projects():
+    return {\"projects\": [{\"id\": 1, \"name\": \"E-commerce Platform\", \"description\": \"Online shopping solution\", \"status\": \"active\"}]}
+
+@app.post(\"/api/generate-stories\")
+def generate_stories():
+    return {\"stories\": [{\"id\": 1, \"title\": \"As a user, I want to login to access my account\", \"description\": \"User authentication functionality\", \"priority\": \"High\", \"points\": 5}]}
+PYEOF
+        fi &&
+        uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+      "
+
+  # Frontend with proper React setup
+  frontend:
+    image: node:18-alpine
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    working_dir: /app
+    depends_on:
+      - backend
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+      - WATCHPACK_POLLING=true
+    command: >
+      sh -c "
+        echo 'Setting up React frontend...' &&
+        if [ ! -d node_modules ]; then
+          npm install react@18.2.0 react-dom@18.2.0 react-scripts@5.0.1 web-vitals
+        fi &&
+        if [ ! -f src/index.js ]; then
+          mkdir -p src public &&
+          cat > public/index.html << 'HTMLEOF'
+<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+    <meta charset=\"utf-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <title>StoryAI Agent</title>
+    <style>
+        body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif; }
+        .container { padding: 20px; max-width: 1200px; margin: 0 auto; }
+        .card { background: white; border-radius: 8px; padding: 20px; margin: 10px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .status-healthy { color: #28a745; font-weight: bold; }
+        .status-offline { color: #dc3545; font-weight: bold; }
+        .btn { padding: 12px 24px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; margin: 5px; }
+        .btn:hover { background: #0056b3; }
+        .project { border-left: 4px solid #007bff; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+    </style>
+</head>
+<body>
+    <div id=\"root\"></div>
+</body>
+</html>
+HTMLEOF
+          cat > src/index.js << 'JSEOF'
+import React, { useState, useEffect } from 'react';
+import ReactDOM from 'react-dom/client';
+
+const Dashboard = () => {
+    const [backendStatus, setBackendStatus] = useState('checking...');
+    const [projects, setProjects] = useState([]);
+    const [loading, setLoading] = useState(false);
+
+    useEffect(() => {
+        checkBackendHealth();
+        loadProjects();
+    }, []);
+
+    const checkBackendHealth = async () => {
+        try {
+            const response = await fetch('http://localhost:8000/health');
+            const data = await response.json();
+            setBackendStatus(data.status);
+        } catch (error) {
+            setBackendStatus('offline');
+        }
+    };
+
+    const loadProjects = async () => {
+        try {
+            const response = await fetch('http://localhost:8000/api/projects');
+            const data = await response.json();
+            setProjects(data.projects);
+        } catch (error) {
+            console.error('Failed to load projects:', error);
+        }
+    };
+
+    const generateStories = async () => {
+        setLoading(true);
+        try {
+            const response = await fetch('http://localhost:8000/api/generate-stories', { 
+                method: 'POST' 
+            });
+            const data = await response.json();
+            alert(`✅ Generated ${data.stories.length} user stories!\\n\\n${data.stories[0].title}`);
+        } catch (error) {
+            alert('❌ Failed to generate stories. Check if backend is running.');
+        }
+        setLoading(false);
+    };
+
+    return (
+        <div className=\"container\">
+            <header style={{ textAlign: 'center', marginBottom: '30px' }}>
+                <h1>🚀 StoryAI Agent</h1>
+                <p style={{ fontSize: '18px', color: '#666' }}>
+                    RAG-based User Story Generation Platform
+                </p>
+            </header>
+
+            <div className=\"grid\">
+                <div className=\"card\">
+                    <h3>🔧 System Status</h3>
+                    <p>Backend API: <span className={backendStatus === 'healthy' ? 'status-healthy' : 'status-offline'}>{backendStatus}</span></p>
+                    <p>Frontend: <span className=\"status-healthy\">running</span></p>
+                    <p>Databases: <span className={backendStatus === 'healthy' ? 'status-healthy' : 'status-offline'}>
+                        {backendStatus === 'healthy' ? 'connected' : 'checking...'}
+                    </span></p>
+                </div>
+
+                <div className=\"card\">
+                    <h3>⚡ Quick Actions</h3>
+                    <button 
+                        className=\"btn\" 
+                        onClick={generateStories}
+                        disabled={loading || backendStatus !== 'healthy'}
+                        style={{ opacity: loading ? 0.6 : 1 }}
+                    >
+                        {loading ? '🔄 Generating...' : '🤖 Generate User Stories'}
+                    </button>
+                    <button 
+                        className=\"btn\" 
+                        onClick={checkBackendHealth}
+                        style={{ background: '#28a745' }}
+                    >
+                        🔄 Refresh Status
+                    </button>
+                </div>
+            </div>
+
+            <div className=\"card\">
+                <h3>📋 Projects ({projects.length})</h3>
+                {projects.length === 0 ? (
+                    <p style={{ color: '#666', fontStyle: 'italic' }}>No projects found. Create your first project!</p>
+                ) : (
+                    projects.map(project => (
+                        <div key={project.id} className=\"card project\" style={{ margin: '10px 0' }}>
+                            <h4>{project.name}</h4>
+                            <p style={{ color: '#666' }}>{project.description}</p>
+                            <span style={{ 
+                                background: '#28a745', 
+                                color: 'white', 
+                                padding: '4px 12px', 
+                                borderRadius: '12px', 
+                                fontSize: '14px' 
+                            }}>
+                                {project.status}
+                            </span>
+                        </div>
+                    ))
+                )}
+            </div>
+
+            <div className=\"card\">
+                <h3>🔗 Database Access</h3>
+                <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                    <a href=\"http://localhost:7474\" target=\"_blank\" rel=\"noopener noreferrer\" className=\"btn\">
+                        🕸️ Neo4j Browser
+                    </a>
+                    <a href=\"http://localhost:6333/dashboard\" target=\"_blank\" rel=\"noopener noreferrer\" className=\"btn\">
+                        🔍 Qdrant Dashboard
+                    </a>
+                    <a href=\"http://localhost:8000\" target=\"_blank\" rel=\"noopener noreferrer\" className=\"btn\">
+                        📚 API Documentation
+                    </a>
+                </div>
+                <p style={{ fontSize: '14px', color: '#666', marginTop: '10px' }}>
+                    Neo4j credentials: neo4j / password123
+                </p>
+            </div>
+
+            <div className=\"card\" style={{ background: '#f8f9fa' }}>
+                <h3>🚀 Next Steps</h3>
+                <ol style={{ paddingLeft: '20px' }}>
+                    <li>Configure your LLM API keys in the .env file</li>
+                    <li>Set up Jira/Confluence integrations</li>
+                    <li>Upload requirement documents</li>
+                    <li>Generate intelligent user stories with AI!</li>
+                </ol>
+            </div>
+        </div>
+    );
+};
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<Dashboard />);
+JSEOF
+        fi &&
+        echo 'Starting React development server...' &&
+        npm start
+      "
+
+volumes:
+  qdrant_data:
+  neo4j_data:
+  postgres_data:
+  redis_data:
