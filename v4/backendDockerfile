@@ -1,0 +1,295 @@
+# Dockerfile for Backend
+FROM node:18-alpine
+
+# Install system dependencies for PDF processing
+RUN apk add --no-cache \
+    python3 \
+    make \
+    g++ \
+    cairo-dev \
+    jpeg-dev \
+    pango-dev \
+    musl-dev \
+    giflib-dev \
+    pixman-dev \
+    pangomm-dev \
+    libjpeg-turbo-dev \
+    freetype-dev
+
+# Set working directory
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies
+RUN npm ci --only=production && npm cache clean --force
+
+# Create app user
+RUN addgroup -g 1001 -S nodejs
+RUN adduser -S appuser -u 1001
+
+# Create uploads directory
+RUN mkdir -p uploads logs && chown -R appuser:nodejs uploads logs
+
+# Copy application code
+COPY --chown=appuser:nodejs . .
+
+# Switch to non-root user
+USER appuser
+
+# Expose port
+EXPOSE 3001
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD node healthcheck.js
+
+# Start the application
+CMD ["npm", "start"]
+
+---
+
+# docker-compose.yml - Complete Stack
+version: '3.8'
+
+services:
+  # Backend API
+  backend:
+    build: .
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+      - MONGODB_URI=mongodb://mongodb:27017/rag-user-stories
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - mongodb
+      - redis
+    volumes:
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # Frontend (if using Docker for frontend too)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:3001
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # MongoDB Database
+  mongodb:
+    image: mongo:7.0
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=admin
+      - MONGO_INITDB_ROOT_PASSWORD=adminpassword
+      - MONGO_INITDB_DATABASE=rag-user-stories
+    volumes:
+      - mongodb_data:/data/db
+      - ./mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # Redis Cache
+  redis:
+    image: redis:7.2-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --requirepass redispassword
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # Nginx Load Balancer
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - backend
+      - frontend
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # Vector Database (Weaviate)
+  weaviate:
+    image: semitechnologies/weaviate:1.22.4
+    ports:
+      - "8080:8080"
+    environment:
+      QUERY_DEFAULTS_LIMIT: 25
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: 'true'
+      PERSISTENCE_DATA_PATH: '/var/lib/weaviate'
+      DEFAULT_VECTORIZER_MODULE: 'none'
+      ENABLE_MODULES: 'text2vec-openai,text2vec-cohere,text2vec-huggingface,ref2vec-centroid,generative-openai,qna-openai'
+      CLUSTER_HOSTNAME: 'node1'
+    volumes:
+      - weaviate_data:/var/lib/weaviate
+    restart: unless-stopped
+    networks:
+      - app-network
+
+volumes:
+  mongodb_data:
+  redis_data:
+  weaviate_data:
+
+networks:
+  app-network:
+    driver: bridge
+
+---
+
+# nginx.conf - Load Balancer Configuration
+events {
+    worker_connections 1024;
+}
+
+http {
+    upstream backend {
+        server backend:3001;
+    }
+
+    upstream frontend {
+        server frontend:3000;
+    }
+
+    # Rate limiting
+    limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
+    limit_req_zone $binary_remote_addr zone=upload:10m rate=2r/s;
+
+    server {
+        listen 80;
+        server_name localhost;
+
+        # Security headers
+        add_header X-Frame-Options DENY;
+        add_header X-Content-Type-Options nosniff;
+        add_header X-XSS-Protection "1; mode=block";
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains";
+
+        # Frontend
+        location / {
+            proxy_pass http://frontend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        # API routes
+        location /api/ {
+            limit_req zone=api burst=20 nodelay;
+            proxy_pass http://backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_read_timeout 300s;
+            proxy_connect_timeout 75s;
+        }
+
+        # Upload endpoint with special handling
+        location /api/upload {
+            limit_req zone=upload burst=5 nodelay;
+            client_max_body_size 50M;
+            proxy_pass http://backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_read_timeout 600s;
+            proxy_send_timeout 600s;
+        }
+
+        # Health check
+        location /health {
+            proxy_pass http://backend;
+            access_log off;
+        }
+    }
+}
+
+---
+
+# healthcheck.js - Health Check Script
+const http = require('http');
+
+const options = {
+  hostname: 'localhost',
+  port: 3001,
+  path: '/health',
+  method: 'GET',
+  timeout: 2000
+};
+
+const req = http.request(options, (res) => {
+  if (res.statusCode === 200) {
+    process.exit(0);
+  } else {
+    process.exit(1);
+  }
+});
+
+req.on('error', () => {
+  process.exit(1);
+});
+
+req.on('timeout', () => {
+  req.destroy();
+  process.exit(1);
+});
+
+req.end();
+
+---
+
+# mongo-init.js - MongoDB Initialization
+db = db.getSiblingDB('rag-user-stories');
+
+// Create collections
+db.createCollection('users');
+db.createCollection('documents');
+db.createCollection('user_stories');
+db.createCollection('sessions');
+db.createCollection('audit_logs');
+
+// Create indexes
+db.users.createIndex({ email: 1 }, { unique: true });
+db.documents.createIndex({ userId: 1, createdAt: -1 });
+db.user_stories.createIndex({ userId: 1, projectId: 1 });
+db.sessions.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+db.audit_logs.createIndex({ userId: 1, timestamp: -1 });
+
+// Create initial admin user
+db.users.insertOne({
+  _id: ObjectId(),
+  email: 'admin@example.com',
+  role: 'admin',
+  isActive: true,
+  createdAt: new Date(),
+  updatedAt: new Date()
+});
+
+print('Database initialized successfully');
